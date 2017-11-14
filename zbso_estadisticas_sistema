@@ -1,0 +1,1195 @@
+*======================================================================*
+*  Analista                 Iniciales       Fecha         Ticket (ITSM)*
+*======================================================================*
+*  Orlando Cumare             OCM         26/11/2001          61062    *
+*  Oswaldo Barreto            ONB         09/09/2005          391256   *
+*  Olga Rodríguez             OR          19/10/2006          XXXXXX   *
+*  Amparo Alvarez             AA          08/05/2007          UNIMAN
+* Se rescató la versión existente en productivo por Unificación.
+*======================================================================*
+REPORT zbso_estadisticas_sistema NO STANDARD PAGE HEADING
+                                LINE-SIZE 255 MESSAGE-ID z1.
+*----------------------------------------------------------------------*
+*                        T A B L A S                                   *
+*----------------------------------------------------------------------*
+TABLES: tadir, tstc.
+
+*****************************************************
+*              CLASS cl_my_event_handler             *
+*****************************************************
+CLASS cl_my_event_handler DEFINITION.
+ PUBLIC SECTION.
+   METHODS:
+     handle_submit_buttons FOR EVENT clicked OF cl_dd_button_element
+                                                    IMPORTING sender.
+ENDCLASS.                    "cl_my_event_handler DEFINITION
+
+DATA: my_handler TYPE REF TO cl_my_event_handler.
+CREATE OBJECT my_handler.
+*----------------------------------------------------------------------*
+*          E S T R U C T U R A S    Y    V A R I A B L E S             *
+*----------------------------------------------------------------------*
+TYPE-POOLS: slis.
+* Catálogo de campos: contiene la descripción de los campos de salida
+DATA: field TYPE slis_t_fieldcat_alv WITH HEADER LINE,
+* Especificaciones de la disposición de la lista: descripción de la
+*  estructura de salida
+gs_layout           TYPE slis_layout_alv,
+gs_sort             TYPE slis_t_sortinfo_alv WITH HEADER LINE,
+gt_events           TYPE slis_t_event,
+gt_list_top_of_page TYPE slis_t_listheader.
+
+
+DATA:   gs_excel       TYPE ole2_object ,
+       gs_wbooklist   TYPE ole2_object ,
+       gs_application TYPE ole2_object ,
+       gs_wbook       TYPE ole2_object ,
+       gs_activesheet TYPE ole2_object ,
+       gs_sheets      TYPE ole2_object ,
+       gs_newsheet    TYPE ole2_object ,
+       gs_cell1       TYPE ole2_object ,
+       gs_cell2       TYPE ole2_object ,
+       gs_cells       TYPE ole2_object ,
+       gs_range       TYPE ole2_object ,
+       gs_font        TYPE ole2_object ,
+       gs_interior    TYPE ole2_object ,
+       gs_columns     TYPE ole2_object ,
+       gs_charts      TYPE ole2_object ,
+       gs_chart       TYPE ole2_object ,
+       gs_charttitle  TYPE ole2_object ,
+       gs_charttitlechar TYPE ole2_object ,
+       gs_chartobjects TYPE ole2_object ,
+       p_sheets TYPE i VALUE 3.
+
+DATA gv_sheet_name(30) TYPE c .
+DATA gv_outer_index LIKE sy-index .
+DATA gv_intex(2) TYPE c .
+DATA gv_line_cntr TYPE i . "line counter
+DATA gv_linno TYPE i . "line number
+DATA gv_colno TYPE i . "column number
+
+DATA gv_value(40) TYPE c . "data
+
+DATA user_statistic LIKE TABLE OF sapwluenti WITH HEADER LINE.
+* Inicio AA 24/09/2008 - Migración
+DATA application_statistic LIKE TABLE OF sapwlustcx WITH HEADER LINE.
+* Fin AA 24/09/2008
+
+DATA: BEGIN OF ue_r OCCURS 0,
+      entry_id TYPE sapwlentid,
+      count    TYPE i,
+     END OF ue_r,
+
+     BEGIN OF itc_salida OCCURS 0,
+        lapso        TYPE spmon,
+        entry_id(40) TYPE c,
+        account      LIKE user_statistic-account,
+        texto(70)    TYPE c,
+        devclass     LIKE tadir-devclass,
+        tra          TYPE i,
+        pro          TYPE i,
+     END OF itc_salida,
+
+     BEGIN OF itc_resumen OCCURS 0,
+       lapso        TYPE spmon,
+       entry_id(40) TYPE c,
+       count        TYPE i,
+       texto(70)    TYPE c,
+     END OF itc_resumen,
+
+*--------------------------------------------------------- Modificado OR
+     BEGIN OF itc_collect OCCURS 0,
+        entry_id(40) TYPE c,
+        account      LIKE user_statistic-account,
+        texto(70)    TYPE c,
+        devclass     LIKE tadir-devclass,
+        tra(1),
+        pro(1),
+     END OF itc_collect.
+* Fin OR
+
+DATA : BEGIN OF itc_def OCCURS 0,
+        entry_id(40) TYPE c,
+        devclass     LIKE tadir-devclass,
+        tra          TYPE i,
+        pro          TYPE i,
+      END OF itc_def.
+
+DATA: sw TYPE i, sw2 TYPE i, indica TYPE i.
+
+DATA: BEGIN OF itc_usuario OCCURS 0 ,
+      uname(35),
+      datos  TYPE i,
+      prueba TYPE i VALUE '20',
+     END OF itc_usuario,
+
+     BEGIN OF itc_us OCCURS 0,
+       uname  LIKE snap-uname,
+     END OF itc_us,
+
+     BEGIN OF itc_pr OCCURS 0,
+       entry_id(40) TYPE c,
+     END OF itc_pr,
+
+      itc_user LIKE itc_usuario OCCURS 0 WITH HEADER LINE.
+
+DATA: BEGIN OF itc_infoprog OCCURS 0,
+       prog     TYPE prog,
+       tcode    TYPE tcode,
+       devclass LIKE tadir-devclass,
+     END OF itc_infoprog.
+
+DATA:  lapso TYPE spmon, fecha LIKE sy-datum, texto(70), textmsg(40),
+      objec TYPE trobjtype, fecha2(10),
+      g_repid LIKE sy-repid, n TYPE i.
+
+INCLUDE zbso_include_comparacion.
+INCLUDE ole2incl .
+*----------------------------------------------------------------------*
+*        Constantes                                                    *
+*----------------------------------------------------------------------*
+CONSTANTS:
+gc_formname_top_of_page  TYPE slis_formname VALUE 'TOP_OF_PAGE',
+gc_formname_user_command TYPE slis_formname VALUE 'USER_COMMAND'.
+
+*----------------------------------------------------------------------*
+*    P A R A M E T R O S      Y/O    S E L E C T - O P T I O N S       *
+*----------------------------------------------------------------------*
+SELECTION-SCREEN BEGIN OF BLOCK blk_0 WITH FRAME TITLE text-000.
+SELECT-OPTIONS: so_user FOR sy-uname,
+               so_obj  FOR sy-repid.
+PARAMETERS: pa_mean1 TYPE spmon DEFAULT sy-datum,
+           pa_mean2 TYPE spmon DEFAULT sy-datum,
+           pa_tran RADIOBUTTON GROUP radi DEFAULT 'X',
+           pa_prog RADIOBUTTON GROUP radi,
+           pa_all  RADIOBUTTON GROUP radi,
+           pa_res  AS CHECKBOX,
+           pa_dup  AS CHECKBOX. "OR
+PARAMETERS: pa_file TYPE localfile DEFAULT 'C:.xls'.
+SELECTION-SCREEN END OF BLOCK blk_0.
+
+*----------------------------------------------------------------------*
+*                             I N I C I O                              *
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+
+ IF pa_res = 'X' AND pa_dup = 'X'.
+   MESSAGE s899(m3) WITH 'Debe seleccionar solo un checkbox'.
+   STOP.
+ ENDIF.
+
+
+ lapso = pa_mean1.
+ IF pa_mean1 <= pa_mean2.
+   WHILE  pa_mean2 >= lapso.
+     PERFORM imprimir.
+     lapso = lapso + 1.
+   ENDWHILE.
+   IF pa_all EQ 'X'.
+     PERFORM busca_all.
+   ENDIF.
+   PERFORM llenar_itc_collect. "OR
+   PERFORM fo_init_layout.
+   PERFORM eventos   USING gt_events[].
+   PERFORM texto_rep USING gt_list_top_of_page[].
+   PERFORM textos_de_columna.
+
+   IF pa_res EQ 'X'.
+     CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+       EXPORTING
+         i_callback_program = g_repid
+         it_fieldcat        = field[]
+         it_sort            = gs_sort[]
+         i_default          = 'X'
+         i_save             = 'A'
+         it_events          = gt_events[]
+       TABLES
+         t_outtab           = itc_resumen
+       EXCEPTIONS
+         program_error      = 1
+         OTHERS             = 2.
+     IF sy-subrc <> 0.
+       MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+               WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+     ENDIF.
+*-------------------------------------------------------- Modificado OR
+   ELSEIF pa_dup = 'X'.
+     CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+       EXPORTING
+         i_callback_program          = g_repid
+         i_callback_html_end_of_list = 'GRAFICOS'
+         it_fieldcat                 = field[]
+         it_sort                     = gs_sort[]
+         i_default                   = 'X'
+         i_save                      = 'A'
+         it_events                   = gt_events[]
+       TABLES
+         t_outtab                    = itc_collect
+       EXCEPTIONS
+         program_error               = 1
+         OTHERS                      = 2.
+     IF sy-subrc <> 0.
+       MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+               WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+     ENDIF.
+* Fin OR
+   ELSE.
+     CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+       EXPORTING
+         i_callback_program          = g_repid
+         i_callback_html_end_of_list = 'GRAFICOS'
+         it_fieldcat                 = field[]
+         it_sort                     = gs_sort[]
+         i_default                   = 'X'
+         i_save                      = 'A'
+         it_events                   = gt_events[]
+       TABLES
+         t_outtab                    = itc_salida
+       EXCEPTIONS
+         program_error               = 1
+         OTHERS                      = 2.
+     IF sy-subrc <> 0.
+       MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+               WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+     ENDIF.
+   ENDIF.
+
+ ELSE.
+   MESSAGE s999(z1) WITH 'Error en periodos solicitados'.
+ ENDIF.
+
+*---------------------------------------------------------------------*
+*       FORM IMPRIMIR                                                 *
+*---------------------------------------------------------------------*
+FORM imprimir.
+
+ CONCATENATE lapso '01' INTO fecha.
+
+ CONCATENATE 'Cargando estadistica período' fecha
+        INTO textmsg SEPARATED BY space.
+
+ CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+   EXPORTING
+     percentage = 0
+     text       = textmsg.
+
+ REFRESH user_statistic.
+ REFRESH application_statistic.                     "AA Migración
+
+ CALL FUNCTION 'SAPWL_WORKLOAD_GET_STATISTIC'
+      EXPORTING
+           periodtype         = 'M'
+*           hostid             = 'TOTAL'
+           startdate          = fecha
+           instance           = 'TOTAL'
+      TABLES
+           user_statistic        = user_statistic
+           application_statistic = application_statistic      "AA
+      EXCEPTIONS
+           unknown_periodtype = 1
+           no_data_found      = 2
+           OTHERS             = 3.
+ IF sy-subrc <> 0.
+   MESSAGE s999(z1) WITH  text-e01 fecha.
+ ENDIF.
+
+ DELETE user_statistic WHERE ttype <> '01'.
+ DELETE application_statistic WHERE ttype <> '01'.           "AA Migración
+
+ IF pa_tran = 'X'.
+   DELETE user_statistic WHERE entry_id+72(1) <> 'T'.
+   DELETE application_statistic WHERE entry_id+72(1) <> 'T'. "AA Migración
+ ENDIF.
+ IF pa_prog = 'X'.
+   DELETE user_statistic WHERE entry_id+72(1) <> 'R'.
+   DELETE application_statistic WHERE entry_id+72(1) <> 'R'.  "AA Migración
+ ENDIF.
+
+* Inicio AA 24/09/2008 - Migración
+ IF user_statistic[] IS INITIAL.
+   LOOP AT application_statistic.
+     MOVE-CORRESPONDING application_statistic TO user_statistic.
+     APPEND user_statistic.
+     CLEAR user_statistic.
+   ENDLOOP.
+ ENDIF.
+* Fin AA 24/09/2008 - Migración
+
+ SORT user_statistic BY entry_id account.
+ REFRESH ue_r.
+ IF pa_res = 'X'.
+   LOOP AT user_statistic WHERE account      IN so_user
+                            AND entry_id(40) IN so_obj.
+     MOVE user_statistic-entry_id TO ue_r-entry_id.
+     MOVE 1 TO ue_r-count.
+     COLLECT ue_r.
+   ENDLOOP.
+   LOOP AT ue_r.
+     CLEAR: texto.
+     IF ue_r-entry_id+72(1) = 'T'.
+       SELECT SINGLE ttext INTO texto FROM  tstct
+              WHERE  sprsl  = sy-langu
+              AND    tcode  = ue_r-entry_id.
+       IF sy-subrc <> 0. MOVE text-002 TO texto. ENDIF.
+     ENDIF.
+     IF ue_r-entry_id+72(1) = 'R'.
+       SELECT SINGLE text INTO texto FROM  trdirt
+              WHERE  name   = ue_r-entry_id
+              AND    sprsl  = sy-langu.
+       IF sy-subrc <> 0. MOVE text-002 TO texto. ENDIF.
+     ENDIF.
+
+     MOVE:  lapso             TO itc_resumen-lapso,
+            ue_r-entry_id(40) TO itc_resumen-entry_id,
+            ue_r-count        TO itc_resumen-count,
+            texto             TO itc_resumen-texto.
+     APPEND itc_resumen.
+   ENDLOOP.
+ ELSE.
+   LOOP AT user_statistic WHERE account IN so_user
+                            AND entry_id(40) IN so_obj.
+     CLEAR: texto.
+     IF user_statistic-entry_id+72(1) = 'T'.
+       SELECT SINGLE ttext INTO texto FROM  tstct
+              WHERE  sprsl  = sy-langu
+              AND    tcode  = user_statistic-entry_id.
+       IF sy-subrc <> 0. MOVE text-002 TO texto. ENDIF.
+       objec = 'TRAN'.
+       MOVE  1 TO itc_salida-tra.
+     ENDIF.
+     IF user_statistic-entry_id+72(1) = 'R'.
+       SELECT SINGLE text INTO texto FROM  trdirt
+              WHERE  name   = user_statistic-entry_id
+              AND    sprsl  = sy-langu.
+       IF sy-subrc <> 0. MOVE text-002 TO texto. ENDIF.
+       objec = 'PROG'.
+       MOVE  1 TO itc_salida-pro.
+     ENDIF.
+     SELECT SINGLE * FROM  tadir WHERE  pgmid  = 'R3TR'
+                                 AND    object = objec
+                        AND    obj_name  = user_statistic-entry_id(40).
+
+     MOVE:  lapso                       TO itc_salida-lapso,
+            user_statistic-entry_id(40) TO itc_salida-entry_id,
+            user_statistic-account      TO itc_salida-account,
+            texto                       TO itc_salida-texto,
+            tadir-devclass              TO itc_salida-devclass.
+
+     APPEND itc_salida.
+     CLEAR: itc_salida-pro, itc_salida-tra.
+
+   ENDLOOP.
+ ENDIF.
+ENDFORM.                    "imprimir
+*&---------------------------------------------------------------------*
+*&      Form  fo_init_layout
+*&---------------------------------------------------------------------*
+FORM fo_init_layout.
+ g_repid = sy-repid.
+ gs_layout-zebra = 'X'.
+ gs_layout-detail_popup = 'X'.
+ENDFORM.                    " fo_init_layout
+*&---------------------------------------------------------------------*
+*&      Form  eventos
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_GT_EVENTS[]  text
+*----------------------------------------------------------------------*
+FORM eventos USING eventos_ejec TYPE slis_t_event.
+ DATA: ls_event TYPE slis_alv_event.
+*
+
+ CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+   EXPORTING
+     i_list_type = 0
+   IMPORTING
+     et_events   = eventos_ejec.
+
+ READ TABLE eventos_ejec WITH KEY name = slis_ev_top_of_page
+                        INTO ls_event.
+ IF sy-subrc = 0.
+   MOVE gc_formname_top_of_page TO ls_event-form.
+   APPEND ls_event TO eventos_ejec.
+ ENDIF.
+
+ENDFORM.                    " eventos
+*&---------------------------------------------------------------------*
+*&      Form  texto_rep
+*&---------------------------------------------------------------------*
+FORM texto_rep USING texto_report TYPE slis_t_listheader.
+ DATA: ls_line TYPE slis_listheader.
+ DATA: v_uno(7), v_dos(7).
+
+*
+ WRITE: sy-datum TO fecha2 DD/MM/YYYY.
+ CONCATENATE pa_mean1+4(2) '/' pa_mean1(4) INTO v_uno.
+ CONCATENATE pa_mean2+4(2) '/' pa_mean2(4) INTO v_dos.
+* Texto del Reporte
+ CLEAR ls_line.
+ ls_line-typ  = 'H'.
+ ls_line-info = text-001.
+ APPEND ls_line TO texto_report.
+ CLEAR ls_line.
+
+* Fecha de ejecución del Reporte
+ CLEAR ls_line.
+ ls_line-typ  = 'S'.
+ ls_line-key  = text-002.
+ ls_line-info = v_uno.
+ APPEND ls_line TO texto_report.
+
+ CLEAR ls_line.
+ ls_line-typ  = 'S'.
+ ls_line-key  = text-004.
+ ls_line-info = v_dos.
+ APPEND ls_line TO texto_report.
+
+
+* Usuario que ejecuta el Reporte
+ ls_line-typ  = 'S'.
+ ls_line-key  = text-003.
+ ls_line-info = sy-uname.
+ APPEND ls_line TO texto_report.
+
+ENDFORM.                    " texto_rep
+*&---------------------------------------------------------------------*
+*&      Form  textos_de_columna
+*&---------------------------------------------------------------------*
+FORM textos_de_columna.
+
+ IF pa_res = 'X'.
+   field-fieldname = 'LAPSO'.
+   field-reptext_ddic = 'Lapso'.
+   field-outputlen = '10'.
+   field-key = 'X'.
+   APPEND field. CLEAR field.
+*
+   field-fieldname = 'ENTRY_ID'.
+   field-reptext_ddic = 'Transacciones/Programas'.
+   field-outputlen = '40'.
+   APPEND field. CLEAR field.
+*
+   field-fieldname = 'COUNT'.
+   field-reptext_ddic = 'Cant.'.
+   field-outputlen = '15'.
+   APPEND field. CLEAR field.
+
+*--------------------------------------------------------- Modificado OR
+ ELSEIF pa_dup = 'X'.
+
+   field-fieldname = 'ENTRY_ID'.
+   field-reptext_ddic = 'Transacciones/Programas'.
+   field-outputlen = '40'.
+   APPEND field. CLEAR field.
+*
+   field-fieldname = 'ACCOUNT'.
+   field-reptext_ddic = 'Usuario'.
+   field-outputlen = '15'.
+   APPEND field. CLEAR field.
+*
+   field-fieldname = 'TEXTO'.
+   field-reptext_ddic = 'Descripcion de Transacciones/Programas'.
+   field-outputlen = '40'.
+   APPEND field. CLEAR field.
+*
+   field-fieldname = 'DEVCLASS'.
+   field-reptext_ddic = 'Clase de Desarrollo'.
+   field-outputlen = '20'.
+   APPEND field. CLEAR field.
+*
+   field-fieldname = 'TRA'.
+   field-reptext_ddic = 'Tra.'.
+   field-outputlen = '6'.
+   field-do_sum    = 'X'.
+   APPEND field. CLEAR field.
+*
+   field-fieldname = 'PRO'.
+   field-reptext_ddic = 'Prg.'.
+   field-outputlen = '6'.
+   field-do_sum    = 'X'.
+   APPEND field. CLEAR field.
+* Fin OR
+
+ ELSE.
+   field-fieldname = 'LAPSO'.
+   field-reptext_ddic = 'Lapso'.
+   field-outputlen = '10'.
+   field-key = 'X'.
+   APPEND field. CLEAR field.
+*
+   field-fieldname = 'ENTRY_ID'.
+   field-reptext_ddic = 'Transacciones/Programas'.
+   field-outputlen = '40'.
+   APPEND field. CLEAR field.
+*
+   field-fieldname = 'ACCOUNT'.
+   field-reptext_ddic = 'Usuario'.
+   field-outputlen = '15'.
+   APPEND field. CLEAR field.
+*
+   field-fieldname = 'TEXTO'.
+   field-reptext_ddic = 'Descripcion de Transacciones/Programas'.
+   field-outputlen = '40'.
+   APPEND field. CLEAR field.
+*
+   field-fieldname = 'DEVCLASS'.
+   field-reptext_ddic = 'Clase de Desarrollo'.
+   field-outputlen = '20'.
+   APPEND field. CLEAR field.
+*
+   field-fieldname = 'TRA'.
+   field-reptext_ddic = 'Tra.'.
+   field-outputlen = '6'.
+   field-do_sum    = 'X'.
+   APPEND field. CLEAR field.
+*
+   field-fieldname = 'PRO'.
+   field-reptext_ddic = 'Prg.'.
+   field-outputlen = '6'.
+   field-do_sum    = 'X'.
+   APPEND field. CLEAR field.
+
+ ENDIF.
+ENDFORM.                    " textos_de_columna
+*---------------------------------------------------------------------*
+*       FORM TOP_OF_PAGE                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM top_of_page.
+
+ CALL FUNCTION 'REUSE_ALV_COMMENTARY_WRITE'
+   EXPORTING
+     i_logo             = 'ENJOYSAP_LOGO'
+     it_list_commentary = gt_list_top_of_page.
+ENDFORM.                    "top_of_page
+
+*---------------------------------------------------------------------*
+*       FORM ESTADISTICA                                              *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*  -->  R_TOP                                                         *
+*---------------------------------------------------------------------*
+FORM graficos USING r_top TYPE REF TO cl_dd_document.
+ DATA: text     TYPE sdydo_text_element.
+ DATA: s_table  TYPE REF TO cl_dd_table_element.
+ DATA: s_table2  TYPE REF TO cl_dd_table_element.
+ DATA: col_key  TYPE REF TO cl_dd_area.
+ DATA: col_info TYPE REF TO cl_dd_area.
+ DATA: col_tit  TYPE REF TO cl_dd_area.
+ DATA: col_tit2  TYPE REF TO cl_dd_area.
+ DATA: col_tit3  TYPE REF TO cl_dd_area.
+ DATA: col_tit4  TYPE REF TO cl_dd_area.
+ DATA: vtop TYPE REF TO cl_gui_event.
+ DATA form1 TYPE REF TO cl_dd_form_area.
+ DATA form2 TYPE REF TO cl_dd_form_area.
+ DATA form3 TYPE REF TO cl_dd_form_area.
+ DATA form4 TYPE REF TO cl_dd_form_area.
+ DATA button1 TYPE REF TO cl_dd_button_element.
+ DATA button2 TYPE REF TO cl_dd_button_element.
+ DATA button3 TYPE REF TO cl_dd_button_element.
+ DATA button4 TYPE REF TO cl_dd_button_element.
+
+* Crear los Botones
+ CALL METHOD r_top->add_table
+   EXPORTING
+     no_of_columns = 4
+     border        = '0'
+   IMPORTING
+     table         = s_table2.
+
+ CALL METHOD s_table2->add_column
+   IMPORTING
+     column = col_tit.
+ CALL METHOD s_table2->add_column
+   IMPORTING
+     column = col_tit2.
+ CALL METHOD s_table2->add_column
+   IMPORTING
+     column = col_tit3.
+ CALL METHOD s_table2->add_column
+   IMPORTING
+     column = col_tit4.
+
+* BOTON Graficar Programas
+ CALL METHOD col_tit->add_form
+   IMPORTING
+     formarea = form1.
+ CALL METHOD form1->add_button
+   EXPORTING
+     sap_icon = 'ICON_GRAPHICS'
+     label    = 'Graficar Programas'
+     name     = 'DD_ADD_TEXT'
+   IMPORTING
+     button   = button1.
+
+* BOTON Usuarios.
+ CALL METHOD col_tit2->add_form
+   IMPORTING
+     formarea = form2.
+ CALL METHOD form2->add_button
+   EXPORTING
+     sap_icon = 'ICON_GRAPHICS'
+     label    = 'Graficar Usuarios'
+     name     = 'DD_ADD_TEXT2'
+   IMPORTING
+     button   = button2.
+
+
+* BOTON Transacciones.
+ CALL METHOD col_tit3->add_form
+   IMPORTING
+     formarea = form3.
+ CALL METHOD form3->add_button
+   EXPORTING
+     sap_icon = 'ICON_GRAPHICS'
+     label    = 'Graficar Transacciones'
+     name     = 'DD_ADD_TEXT3'
+   IMPORTING
+     button   = button3.
+
+ SET HANDLER my_handler->handle_submit_buttons FOR button1.
+ SET HANDLER my_handler->handle_submit_buttons FOR button2.
+ SET HANDLER my_handler->handle_submit_buttons FOR button3.
+
+ IF pa_all EQ 'X'.
+   CALL METHOD col_tit4->add_form
+     IMPORTING
+       formarea = form4.
+   CALL METHOD form4->add_button
+     EXPORTING
+       sap_icon = 'ICON_COMPARE'
+       label    = 'Bajar Comparación'
+       name     = 'DD_ADD_TEXT4'
+     IMPORTING
+       button   = button4.
+   SET HANDLER my_handler->handle_submit_buttons FOR button4.
+ ENDIF.
+
+ENDFORM.                    "graficos
+****************************************************
+*    cl_my_event_handler implementation            *
+****************************************************
+CLASS cl_my_event_handler IMPLEMENTATION.
+****************************************************
+*  METHOD handle_submit_buttons.                   *
+****************************************************
+ METHOD handle_submit_buttons.
+   CASE sender->name.
+*     Dum de Programas
+     WHEN 'DD_ADD_TEXT'.
+       PERFORM accion_boton.
+*     Usuarios
+     WHEN 'DD_ADD_TEXT2'.
+       PERFORM accion_boton2.
+*     Transacciones
+     WHEN 'DD_ADD_TEXT3'.
+       PERFORM accion_boton3.
+*     Bajar Excel de  comparación
+     WHEN 'DD_ADD_TEXT4'.
+
+       PERFORM accion_boton4  TABLES itc_def
+                                     itc_infoprog
+                              USING  pa_file.
+
+   ENDCASE.
+ ENDMETHOD.                    "handle_submit_buttons
+ENDCLASS.                    "cl_my_event_handler IMPLEMENTATION
+*&---------------------------------------------------------------------*
+*&      Form  ACCION_BOTON
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM accion_boton.
+
+ REFRESH: itc_pr, itc_usuario, itc_user .
+
+ LOOP AT itc_salida WHERE pro = 1.
+   MOVE itc_salida-entry_id TO itc_pr-entry_id.
+   APPEND itc_pr.
+ ENDLOOP.
+
+ DESCRIBE TABLE itc_pr LINES n.
+ IF n GT 0.
+
+   SORT itc_pr BY entry_id.
+   sw2 = 0.
+   LOOP AT itc_pr.
+     sw2 = sw2 + 1.
+     AT END OF entry_id.
+       MOVE: sw2             TO itc_usuario-datos,
+             itc_pr-entry_id TO itc_usuario-uname.
+       APPEND itc_usuario.
+       CLEAR itc_usuario.
+       sw2 = 0.
+     ENDAT.
+   ENDLOOP.
+*
+* Para Ordenar y tomar solamente los 20  registros mas Altos y el resto
+*en  una sola variable
+   SORT itc_usuario BY datos DESCENDING.
+   indica = 0.
+   LOOP AT itc_usuario.
+     indica = indica + 1.
+     IF indica LE '20'.
+       MOVE-CORRESPONDING itc_usuario TO itc_user.
+       APPEND itc_user.
+       CLEAR itc_user.
+       CONTINUE.
+     ENDIF.
+     MOVE:   'OTROS'           TO itc_user-uname,
+             itc_usuario-datos TO itc_user-datos.
+     COLLECT itc_user.
+     CLEAR   itc_user.
+   ENDLOOP.
+   CALL FUNCTION 'GRAPH_2D'
+     EXPORTING
+       type       = 'TP'
+       mail_allow = 'X'
+       titl       = 'PROGRAMAS'
+     TABLES
+       data       = itc_user.
+
+ ELSE.
+   MESSAGE i899 WITH 'No existe datos para graficar'.
+ ENDIF.
+*  FREE: itc_user[].
+ENDFORM.                    " ACCION_BOTON
+*&---------------------------------------------------------------------*
+*&      Form  ACCION_BOTON2
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM accion_boton2.
+
+ REFRESH: itc_user, itc_us, itc_usuario.
+
+ LOOP AT itc_salida.
+   MOVE itc_salida-account TO itc_us-uname.
+   APPEND itc_us.
+ ENDLOOP.
+
+ SORT itc_us BY uname.
+
+ LOOP AT itc_us.
+   sw2 = sw2 + 1.
+   AT END OF uname.
+     MOVE: sw2          TO itc_usuario-datos,
+           itc_us-uname TO itc_usuario-uname.
+     APPEND itc_usuario.
+     CLEAR itc_usuario.
+     sw2 = 0.
+   ENDAT.
+ ENDLOOP.
+*
+* Para Ordenar y tomar solamente los 10 REGISTROS mas Altos y el resto
+*en  una sola variable
+ SORT itc_usuario BY datos DESCENDING.
+ indica = 0.
+
+ LOOP AT itc_usuario.
+   indica = indica + 1.
+   IF indica LE '20'.
+     MOVE-CORRESPONDING itc_usuario TO itc_user.
+     APPEND itc_user.
+     CLEAR itc_user.
+     CONTINUE.
+   ENDIF.
+   MOVE:   'OTROS'           TO itc_user-uname,
+           itc_usuario-datos TO itc_user-datos.
+   COLLECT itc_user.
+   CLEAR   itc_user.
+ ENDLOOP.
+
+ CALL FUNCTION 'GRAPH_2D'
+   EXPORTING
+     type       = 'TP'
+     mail_allow = 'X'
+     titl       = 'USUARIOS'
+   TABLES
+     data       = itc_user.
+
+*  FREE: ITC_USER[].
+ENDFORM.                    " ACCION_BOTON2
+*&---------------------------------------------------------------------*
+*&      Form  ACCION_BOTON3
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM accion_boton3.
+
+ REFRESH: itc_pr, itc_usuario, itc_user .
+
+ LOOP AT itc_salida WHERE tra = 1.
+   MOVE itc_salida-entry_id TO itc_pr-entry_id.
+   APPEND itc_pr.
+ ENDLOOP.
+
+ DESCRIBE TABLE itc_pr LINES n.
+ IF n GT 0.
+
+   SORT itc_pr BY entry_id.
+   sw2 = 0.
+   LOOP AT itc_pr.
+     sw2 = sw2 + 1.
+     AT END OF entry_id.
+       MOVE: sw2             TO itc_usuario-datos,
+             itc_pr-entry_id TO itc_usuario-uname.
+       APPEND itc_usuario.
+       CLEAR itc_usuario.
+       sw2 = 0.
+     ENDAT.
+   ENDLOOP.
+
+* Para Ordenar y tomar solamente los 20  registros mas Altos y el resto
+*en  una sola variable
+   SORT itc_usuario BY datos DESCENDING.
+   indica = 0.
+   LOOP AT itc_usuario.
+     indica = indica + 1.
+     IF indica LE '20'.
+       MOVE-CORRESPONDING itc_usuario TO itc_user.
+       APPEND itc_user.
+       CLEAR itc_user.
+       CONTINUE.
+     ENDIF.
+     MOVE:   'OTROS'           TO itc_user-uname,
+             itc_usuario-datos TO itc_user-datos.
+     COLLECT itc_user.
+     CLEAR   itc_user.
+   ENDLOOP.
+   CALL FUNCTION 'GRAPH_2D'
+     EXPORTING
+       type       = 'TP'
+       mail_allow = 'X'
+       titl       = 'TRANSACCIONES'
+     TABLES
+       data       = itc_user.
+
+ ELSE.
+   MESSAGE i899 WITH 'No existe datos para graficar'.
+ ENDIF.
+
+*  FREE: ITC_USER[].
+ENDFORM.                    " ACCION_BOTON3
+*&---------------------------------------------------------------------*
+*&      Form  busca_ALL
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM busca_all.
+
+ REFRESH: itc_infoprog.
+
+ DELETE ADJACENT DUPLICATES FROM itc_salida COMPARING entry_id.
+ DELETE itc_salida WHERE entry_id = 'Z*'.
+ SELECT prog  FROM d010sinf
+ APPENDING CORRESPONDING FIELDS OF TABLE itc_infoprog
+                 WHERE prog IN so_obj
+                 AND   r3state = 'A'
+                 AND ( subc = '1' OR subc = 'M' ).
+
+ DELETE itc_infoprog WHERE prog = 'Z*'.
+ LOOP AT itc_salida WHERE pro = 1.
+   READ TABLE itc_infoprog WITH KEY prog = itc_salida-entry_id.
+   IF sy-subrc EQ 0.
+     DELETE itc_infoprog INDEX sy-tabix.
+   ENDIF.
+ ENDLOOP.
+* Verifica si el programa fue ejecutado por su transacción
+ LOOP AT itc_salida WHERE tra = 1.
+   SELECT SINGLE * FROM tstc WHERE tcode = itc_salida-entry_id.
+   IF sy-subrc EQ 0.
+     READ TABLE itc_infoprog WITH KEY prog = tstc-pgmna.
+     IF sy-subrc EQ 0.
+       DELETE itc_infoprog INDEX sy-tabix.
+     ENDIF.
+   ENDIF.
+ ENDLOOP.
+
+ LOOP AT itc_infoprog.
+   SELECT SINGLE * FROM tstc WHERE pgmna = itc_infoprog-prog.
+   IF sy-subrc EQ 0.
+     itc_infoprog-tcode = tstc-tcode.
+   ENDIF.
+   SELECT SINGLE * FROM  tadir
+                      WHERE  pgmid  = 'R3TR'
+                      AND    object = 'PROG'
+                      AND    obj_name  = itc_infoprog-prog.
+   IF sy-subrc EQ 0.
+     itc_infoprog-devclass = tadir-devclass .
+   ENDIF.
+   MODIFY itc_infoprog INDEX sy-tabix.
+ ENDLOOP.
+
+ REFRESH itc_def.
+ LOOP AT itc_salida.
+   MOVE-CORRESPONDING itc_salida TO itc_def.
+   COLLECT itc_def.
+ ENDLOOP.
+
+ENDFORM.                    " busca_ALL
+*&---------------------------------------------------------------------*
+*&      Form  llenar_itc_collect
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM llenar_itc_collect.
+
+ LOOP AT itc_salida.
+   MOVE-CORRESPONDING itc_salida TO itc_collect.
+   IF itc_salida-tra = '1'.
+     MOVE 'X' TO itc_collect-tra.
+   ELSEIF itc_salida-pro = '1'.
+     MOVE 'X' TO itc_collect-pro.
+   ENDIF.
+   COLLECT itc_collect. CLEAR itc_collect.
+ ENDLOOP.
+
+ SORT itc_collect ASCENDING BY account entry_id.
+
+ENDFORM.                    " llenar_itc_collect
+*----------------------------------------------------------------------*
+*   INCLUDE ZBSO_INCLUDE_COMPARACION                                   *
+*----------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  accion_boton4
+*&---------------------------------------------------------------------*
+form accion_boton4  tables pa_tab
+                          pa_tod
+                   using  pa_file.
+
+
+ do p_sheets times .
+*--Forming sheet name
+   gv_intex = sy-index .
+   gv_outer_index = sy-index .
+   gv_line_cntr = 1 .                       "line counter
+
+*--Putting axis labels
+   gv_colno = 1 .
+   gv_linno = gv_line_cntr - 1 .
+
+   case sy-index.
+*--For the first loop, Excel is initiated and one new sheet is added
+     when 1.
+       gv_sheet_name = 'Programas Utilizados'.
+       create object gs_excel 'EXCEL.APPLICATION' .
+       set property of gs_excel 'Visible' = 0.
+       get property of gs_excel 'Workbooks' = gs_wbooklist .
+       get property of gs_wbooklist 'Application' = gs_application .
+       set property of gs_application 'SheetsInNewWorkbook' = 1 .
+       call method of gs_wbooklist 'Add' = gs_wbook .
+       get property of gs_application 'ActiveSheet' = gs_activesheet .
+       set property of gs_activesheet 'Name' = gv_sheet_name .
+       perform datos tables pa_tab
+                      using 'P'.
+*--For the rest of loops, other sheets are added
+     when 2 .
+       gv_sheet_name = 'Transacciones Utilizadas'.
+       get property of gs_wbook 'Sheets' = gs_sheets .
+       call method of gs_sheets 'Add' = gs_newsheet .
+       set property of gs_newsheet 'Name' = gv_sheet_name .
+       perform datos tables pa_tab
+                      using 'T'.
+     when 3.
+       gv_sheet_name = 'Prog&Tran.No Utilizados'.
+       get property of gs_wbook 'Sheets' = gs_sheets .
+       call method of gs_sheets 'Add' = gs_newsheet .
+       set property of gs_newsheet 'Name' = gv_sheet_name .
+       perform datos tables pa_tod
+                     using ' '.
+   endcase.
+
+   gv_line_cntr = 1 . "line counter
+
+ enddo .
+
+ call method of gs_wbook 'SaveAs'
+         exporting #1 = pa_file
+                   #2 = 1.
+
+
+   free object gs_excel.
+
+*--Deallocating memory
+ free: gs_excel, gs_wbooklist, gs_application, gs_wbook,
+gs_activesheet,gs_sheets, gs_newsheet, gs_cell1, gs_cell2, gs_cells,
+gs_range, gs_font, gs_interior, gs_columns, gs_charts, gs_chart,
+gs_charttitle, gs_charttitlechar, gs_chartobjects .
+
+endform.                    " accion_boton4
+*&---------------------------------------------------------------------*
+*&      Form  datos
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_TABLE  text
+*      -->P_ITC_SALIDA  text
+*----------------------------------------------------------------------*
+form datos tables p_table
+          using  p_var.
+
+ if p_var eq 'P'.
+*--Writing some additional data for the title
+   call method of gs_excel 'Cells' = gs_cell1
+        exporting #1 = gv_line_cntr
+                  #2 = 1.
+   set property of gs_cell1 'Value' = 'Programas'.
+
+   call method of gs_excel 'Cells' = gs_cell1
+        exporting #1 = gv_line_cntr
+                  #2 = 2.
+   set property of gs_cell1 'Value' = 'Clase'.
+
+   call method of gs_excel 'Cells' = gs_cell1
+       exporting #1 = 1
+                 #2 = 1.
+   call method of gs_excel 'Cells' = gs_cell2
+        exporting #1 = gv_line_cntr
+                  #2 = 5.
+   call method of gs_excel 'Range' = gs_cells
+        exporting #1 = gs_cell1
+                  #2 = gs_cell2.
+   call method of gs_cells 'Select' .
+
+   get property of gs_cells 'Font' = gs_font .
+   set property of gs_font 'Bold' = 1 .
+
+   loop at itc_def where pro = 1.
+     gv_colno = 1.
+     add 1 to gv_line_cntr.
+     gv_value = itc_def-entry_id .
+     call method of gs_excel 'Cells' = gs_cell1
+          exporting #1 = gv_line_cntr
+                    #2 = gv_colno.
+     set property of gs_cell1 'Value' = gv_value .
+
+     gv_colno = 2.
+     gv_value = itc_def-devclass .
+     call method of gs_excel 'Cells' = gs_cell1
+          exporting #1 = gv_line_cntr
+                    #2 = gv_colno.
+     set property of gs_cell1 'Value' = gv_value.
+
+   endloop.
+ elseif p_var = 'T'.
+*--Writing some additional data for the title
+   call method of gs_excel 'Cells' = gs_cell1
+        exporting #1 = gv_line_cntr
+                  #2 = 1.
+   set property of gs_cell1 'Value' = 'Transacciones'.
+
+   call method of gs_excel 'Cells' = gs_cell1
+        exporting #1 = gv_line_cntr
+                  #2 = 2.
+   set property of gs_cell1 'Value' = 'Clase'.
+
+   call method of gs_excel 'Cells' = gs_cell1
+       exporting #1 = 1
+                 #2 = 1.
+   call method of gs_excel 'Cells' = gs_cell2
+        exporting #1 = gv_line_cntr
+                  #2 = 5.
+   call method of gs_excel 'Range' = gs_cells
+        exporting #1 = gs_cell1
+                  #2 = gs_cell2.
+   call method of gs_cells 'Select' .
+
+   get property of gs_cells 'Font' = gs_font .
+   set property of gs_font 'Bold' = 1 .
+
+   loop at itc_def where tra = 1.
+     gv_colno = 1.
+     add 1 to gv_line_cntr.
+     gv_value = itc_def-entry_id .
+     call method of gs_excel 'Cells' = gs_cell1
+          exporting #1 = gv_line_cntr
+                    #2 = gv_colno.
+     set property of gs_cell1 'Value' = gv_value .
+
+     gv_colno = 2.
+     gv_value = itc_def-devclass .
+     call method of gs_excel 'Cells' = gs_cell1
+          exporting #1 = gv_line_cntr
+                    #2 = gv_colno.
+     set property of gs_cell1 'Value' = gv_value.
+   endloop.
+ else.
+*--Writing some additional data for the title
+   call method of gs_excel 'Cells' = gs_cell1
+        exporting #1 = gv_line_cntr
+                  #2 = 1.
+   set property of gs_cell1 'Value' = 'Programas'.
+
+   call method of gs_excel 'Cells' = gs_cell1
+        exporting #1 = gv_line_cntr
+                  #2 = 2.
+   set property of gs_cell1 'Value' = 'Transacciones'.
+*
+   call method of gs_excel 'Cells' = gs_cell1
+        exporting #1 = gv_line_cntr
+                  #2 = 3.
+   set property of gs_cell1 'Value' = 'Clase'.
+*
+   call method of gs_excel 'Cells' = gs_cell1
+       exporting #1 = 1
+                 #2 = 1.
+
+   call method of gs_excel 'Cells' = gs_cell2
+        exporting #1 = gv_line_cntr
+                  #2 = 5.
+   call method of gs_excel 'Range' = gs_cells
+        exporting #1 = gs_cell1
+                  #2 = gs_cell2.
+   call method of gs_cells 'Select' .
+
+   get property of gs_cells 'Font' = gs_font .
+   set property of gs_font 'Bold' = 1 .
+
+   loop at itc_infoprog.
+     add 1 to gv_line_cntr.
+     gv_colno = 1.
+     gv_value = itc_infoprog-prog.
+     call method of gs_excel 'Cells' = gs_cell1
+          exporting #1 = gv_line_cntr
+                    #2 = gv_colno.
+     set property of gs_cell1 'Value' = gv_value .
+
+     gv_colno = 2.
+     gv_value = itc_infoprog-tcode.
+     call method of gs_excel 'Cells' = gs_cell1
+          exporting #1 = gv_line_cntr
+                    #2 = gv_colno.
+     set property of gs_cell1 'Value' = gv_value .
+
+     gv_colno = 3.
+     gv_value = itc_infoprog-devclass.
+     call method of gs_excel 'Cells' = gs_cell1
+          exporting #1 = gv_line_cntr
+                    #2 = gv_colno.
+     set property of gs_cell1 'Value' = gv_value.
+   endloop.
+
+ endif.
+
+
+
+endform.                    " datos
